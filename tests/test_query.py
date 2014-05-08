@@ -16,6 +16,15 @@ class QueryResultTestCase(unittest.TestCase):
         self.assertEqual(response.total_results, 4)
         self.assertEqual(len(response.documents), 4)
 
+    def test_search_persistent(self):
+        solr = Solr(os.getenv('SOLR_URL'), persistent=True)
+        for _ in xrange(10):
+            response = solr.search(q='*:*')
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.total_results, 4)
+            self.assertEqual(len(response.documents), 4)
+
+
     def test_search_cursor(self):
         cursor = self.solr.search_cursor(q='*:*')
         i = 0
