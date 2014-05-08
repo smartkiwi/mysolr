@@ -24,7 +24,7 @@ class Solr(object):
     """Acts as an easy-to-use interface to Solr."""
 
     def __init__(self, base_url='http://localhost:8080/solr/', auth=None,
-                 version=None):
+                 version=None, persistent=False):
         """ Initializes a Solr object. Solr URL is a needed parameter.
 
         :param base_url: Url to solr index
@@ -34,6 +34,7 @@ class Solr(object):
                         version is 4.0.0 If you set to none this parameter
                         a request to admin/system will be done at init time
                         in order to guess the version.
+        :param persistent: reuse HTTP connection for consequent requests
         """
         self.base_url = base_url
         # base_url must be end with /
@@ -44,6 +45,18 @@ class Solr(object):
         if not version:
             self.version = self.get_version()
         assert(self.version in (1, 3, 4))
+        self.persistent = persistent
+
+    def get_session(self):
+        """ lazy session init """
+        if hasattr(self, "persistent") and self.persistent:
+            if not hasattr(self, "_session") or not self._session:
+                self._session = requests.Session()
+            req = self._session
+        else:
+            req = requests
+        return req
+
 
     def search(self, resource='select', **kwargs):
         """Queries Solr with the given kwargs and returns a SolrResponse
@@ -58,7 +71,7 @@ class Solr(object):
         """
         query = build_request(kwargs)
         
-        http_response = requests.get(urljoin(self.base_url, resource),
+        http_response = self.get_session().get(urljoin(self.base_url, resource),
                                      params=query, auth=self.auth)
 
         solr_response = SolrResponse(http_response)
