@@ -21,28 +21,37 @@ import json
 import requests
 
 
-class PersistentSessions:
-    """ Mixin to provide configurable session persistence"""
+class ConfigurableRequestWrapper(object):
+    """ Allows to have configurable long living HTTP sessions
+    """
+    def __init__(self, persistent=False, use_get=False):
+        self.persistent = persistent
+        self._session = None
+        self.use_get = use_get
+
     def get_session(self):
-        """ lazy session init """
-        if hasattr(self, "persistent") and self.persistent:
-            if not hasattr(self, "_session") or not self._session:
+        if self.persistent:
+            if not self._session:
                 self._session = requests.Session()
             req = self._session
         else:
             req = requests
         return req
 
-    def close_session(self):
-        self._session.close()
-        self._session = None
+    def get_or_post(self, *args, **kwargs):
+        """if user wants to use get we has to convert data to params"""
+        if self.use_get:
+            kwargs["params"] = kwargs["data"]
+            del kwargs["data"]
+            return self.get_session().get(*args, **kwargs)
+        return self.get_session().post(*args, **kwargs)
 
 
-class Solr(object, PersistentSessions):
+class Solr(object):
     """Acts as an easy-to-use interface to Solr."""
 
     def __init__(self, base_url='http://localhost:8080/solr/', auth=None,
-                 version=None, persistent=False):
+                 version=None, persistent=False, use_get=False):
         """ Initializes a Solr object. Solr URL is a needed parameter.
 
         :param base_url: Url to solr index
@@ -53,6 +62,8 @@ class Solr(object, PersistentSessions):
                         a request to admin/system will be done at init time
                         in order to guess the version.
         :param persistent: reuse HTTP connection for consequent requests
+        :param use_get: make GET HTTP requests for search and search_cursor
+                        - to allow caching Solr responses (i.e. with Varnish)
         """
         self.base_url = base_url
         # base_url must be end with /
@@ -63,7 +74,7 @@ class Solr(object, PersistentSessions):
         if not version:
             self.version = self.get_version()
         assert(self.version in (1, 3, 4))
-        self.persistent = persistent
+        self.request_wrapper = ConfigurableRequestWrapper(persistent=persistent, use_get=use_get)
 
     def search(self, resource='select', **kwargs):
         """Queries Solr with the given kwargs and returns a SolrResponse
@@ -78,19 +89,17 @@ class Solr(object, PersistentSessions):
         """
         query = build_request(kwargs)
 
-
-        http_response = self.get_session().post(urljoin(self.base_url, resource),
+        http_response = self.request_wrapper.get_or_post(urljoin(self.base_url, resource),
                                                 data=query, auth=self.auth,
                                                 headers={'Connection': 'close'})
 
         solr_response = SolrResponse(http_response)
         return solr_response
 
-
     def search_cursor(self, resource='select', **kwargs):
         """ """
         query = build_request(kwargs)
-        cursor = Cursor(urljoin(self.base_url, resource), query, self.auth, persistent=self.persistent)
+        cursor = Cursor(urljoin(self.base_url, resource), query, self.auth, request_wrapper=self.request_wrapper)
 
         return cursor
 
@@ -344,14 +353,16 @@ class Solr(object, PersistentSessions):
         return http_response.content
 
 
-class Cursor(object, PersistentSessions):
+class Cursor(object):
     """ Implements the concept of cursor in relational databases """
-    def __init__(self, url, query, auth=None, persistent=False):
+    def __init__(self, url, query, auth=None, request_wrapper=None):
         """ Cursor initialization """
         self.url = url
         self.query = query
         self.auth = auth
-        self.persistent = persistent
+        if not request_wrapper:
+            raise ValueError("request_wrapper keyword argument is not set")
+        self.request_wrapper = request_wrapper
 
     def fetch(self, rows=None):
         """ Generator method that grabs all the documents in bulk sets of 
@@ -370,7 +381,7 @@ class Cursor(object, PersistentSessions):
         end = False
         docs_retrieved = 0
         while not end:
-            http_response = self.get_session().post(self.url, data=self.query,
+            http_response = self.request_wrapper.get_or_post(self.url, data=self.query,
                                           auth=self.auth,
                                           headers={'Connection': 'close'})
             solr_response = SolrResponse(http_response)
