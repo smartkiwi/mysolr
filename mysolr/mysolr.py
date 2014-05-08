@@ -20,11 +20,29 @@ from xml.sax.saxutils import escape
 import json
 import requests
 
-class Solr(object):
+
+class PersistentSessions:
+    """ Mixin to provide configurable session persistence"""
+    def get_session(self):
+        """ lazy session init """
+        if hasattr(self, "persistent") and self.persistent:
+            if not hasattr(self, "_session") or not self._session:
+                self._session = requests.Session()
+            req = self._session
+        else:
+            req = requests
+        return req
+
+    def close_session(self):
+        self._session.close()
+        self._session = None
+
+
+class Solr(object, PersistentSessions):
     """Acts as an easy-to-use interface to Solr."""
 
     def __init__(self, base_url='http://localhost:8080/solr/', auth=None,
-                 version=None):
+                 version=None, persistent=False):
         """ Initializes a Solr object. Solr URL is a needed parameter.
 
         :param base_url: Url to solr index
@@ -34,6 +52,7 @@ class Solr(object):
                         version is 4.0.0 If you set to none this parameter
                         a request to admin/system will be done at init time
                         in order to guess the version.
+        :param persistent: reuse HTTP connection for consequent requests
         """
         self.base_url = base_url
         # base_url must be end with /
@@ -44,6 +63,7 @@ class Solr(object):
         if not version:
             self.version = self.get_version()
         assert(self.version in (1, 3, 4))
+        self.persistent = persistent
 
     def search(self, resource='select', **kwargs):
         """Queries Solr with the given kwargs and returns a SolrResponse
@@ -57,21 +77,23 @@ class Solr(object):
 
         """
         query = build_request(kwargs)
-        
-        http_response = requests.post(urljoin(self.base_url, resource),
-                                      data=query, auth=self.auth,
-                                      headers={'Connection': 'close'})
+
+
+        http_response = self.get_session().post(urljoin(self.base_url, resource),
+                                                data=query, auth=self.auth,
+                                                headers={'Connection': 'close'})
 
         solr_response = SolrResponse(http_response)
         return solr_response
 
+
     def search_cursor(self, resource='select', **kwargs):
         """ """
         query = build_request(kwargs)
-        cursor = Cursor(urljoin(self.base_url, resource), query, self.auth)
+        cursor = Cursor(urljoin(self.base_url, resource), query, self.auth, persistent=self.persistent)
 
         return cursor
-    
+
     def async_search(self, queries, size=10, resource='select'):
         """ Asynchronous search using async module from requests. 
 
@@ -114,7 +136,7 @@ class Solr(object):
             http_response = self._post_json(json.dumps(documents))
         if commit:
             self.commit()
-        
+
         return SolrResponse(http_response)
 
     def delete_by_key(self, identifier, commit=True):
@@ -268,7 +290,7 @@ class Solr(object):
             #we dont call build_query because 'q' is NOT mandatory in this case
             kwargs['wt'] = get_wt()
             headers = {'Content-type': 'text/json'}
-            http_response = requests.post(urljoin(self.base_url, resource), 
+            http_response = requests.post(urljoin(self.base_url, resource),
                                           params=kwargs,
                                           data=text,
                                           headers=headers,
@@ -290,8 +312,8 @@ class Solr(object):
             'Content-Length': "%s" % len(xml_data),
             'Connection': 'close'
         }
-        http_response = requests.post(url, data=xml_data,
-                                      headers=headers, auth=self.auth)
+        http_response = self.get_session().post(url, data=xml_data,
+                                                headers=headers, auth=self.auth)
         return http_response
 
     def _post_json(self, json_doc):
@@ -306,8 +328,8 @@ class Solr(object):
             'Content-Length': "%s" % len(json_data),
             'Connection': 'close'
         }
-        http_response = requests.post(url, data=json_data,
-                                      headers=headers, auth=self.auth)
+        http_response = self.get_session().post(url, data=json_data,
+                                                headers=headers, auth=self.auth)
         return http_response
 
     def _get_file(self, filename):
@@ -317,18 +339,19 @@ class Solr(object):
             'contentType': 'text/xml;charset=utf-8',
             'file' : filename
         }
-        http_response = requests.get(url, params=params, auth=self.auth,
-                                     headers={'Connection': 'close'})
+        http_response = self.get_session().get(url, params=params, auth=self.auth,
+                                               headers={'Connection': 'close'})
         return http_response.content
 
 
-class Cursor(object):
+class Cursor(object, PersistentSessions):
     """ Implements the concept of cursor in relational databases """
-    def __init__(self, url, query, auth=None):
+    def __init__(self, url, query, auth=None, persistent=False):
         """ Cursor initialization """
         self.url = url
         self.query = query
         self.auth = auth
+        self.persistent = persistent
 
     def fetch(self, rows=None):
         """ Generator method that grabs all the documents in bulk sets of 
@@ -347,7 +370,7 @@ class Cursor(object):
         end = False
         docs_retrieved = 0
         while not end:
-            http_response = requests.post(self.url, data=self.query,
+            http_response = self.get_session().post(self.url, data=self.query,
                                           auth=self.auth,
                                           headers={'Connection': 'close'})
             solr_response = SolrResponse(http_response)
